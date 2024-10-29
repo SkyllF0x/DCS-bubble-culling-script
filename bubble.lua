@@ -1,0 +1,219 @@
+local deactivateGroups = true --if true will deactivate group back when range > activationRange + deactivateMargin
+local deactivateMargin = 18520 --10nm 
+local stepTime = 30 --time between checks in seconds
+
+local groupsList = {}
+local aliveGroupList = {}
+local weaponsList = {}
+
+BubbleSystem = {
+    debugOn = false
+}
+
+function BubbleSystem:countKeyVals(tbl)
+    local counter = 0
+    for _, item in pairs(tbl) do 
+        counter = counter + 1
+    end
+    return counter
+end
+
+function BubbleSystem:printDebug(msg)
+    if not self.debugOn then 
+        return
+    end
+
+    trigger.action.outText(msg, 30)
+    env.info("Bubble script: " .. msg)
+end
+
+function BubbleSystem:enableDebug(value)
+    self.debugOn = value
+end
+
+function BubbleSystem:addGroup(group, prefix, range, iads)
+    local idx = string.find(group:getName(), prefix) 
+    if idx then 
+
+        if not mist.getGroupTable(group:getName()).lateActivation then
+            --group not use late activation
+            BubbleSystem:printDebug("Group not use lateActivation, skipped: " .. group:getName())
+            return
+         end
+
+        if not groupsList[prefix] then
+            groupsList[prefix] = {groups = {}, activationRange = range, addToIADS = iads}
+            aliveGroupList[prefix] = {}
+        end 
+        groupsList[prefix].groups[group:getID()] = group
+    end
+end
+
+
+function BubbleSystem:checkActivateGroup(group, range)
+    
+    --check aircraft/helos
+    for _, coal in pairs({coalition.side.RED, coalition.side.BLUE}) do 
+
+        for _, groupType in pairs({Group.Category.AIRPLANE, Group.Category.HELICOPTER}) do 
+           
+            for _, threatGroup in pairs(coalition.getGroups(coal, groupType)) do 
+
+                if group:getCoalition() ~= coal then
+
+                    for _, unit in pairs(threatGroup:getUnits()) do 
+
+                        if mist.utils.get2DDist(unit:getPoint(), group:getUnit(1):getPoint()) < range then 
+                            return true
+                        end
+                    end
+                end
+            end
+        end
+
+    end
+
+    --check weapons
+    local wpn = {}
+    for _, weapon in pairs(weaponsList) do 
+
+        if weapon:isExist() then 
+
+            wpn[#wpn+1] = weapon
+            if group:getCoalition() ~= weapon:getCoalition() 
+                and mist.utils.get2DDist(weapon:getPoint(), group:getUnit(1):getPoint()) < range then
+                    return true
+            end
+        end
+    end
+    weaponsList = wpn
+
+    return false
+end
+
+function BubbleSystem:checkDeactivateGroup(group, range)
+    return not BubbleSystem:checkActivateGroup(group, range + deactivateMargin)
+end
+
+function BubbleSystem:addGroupsByPrefix(prefix, activateRange, iads)
+
+    for _, coal in pairs({coalition.side.RED, coalition.side.BLUE}) do
+        for _, group in pairs(coalition.getGroups(coal, Group.Category.GROUND)) do 
+
+            BubbleSystem:addGroup(group, prefix, activateRange, iads)
+        end
+    end
+
+    if groupsList[prefix] then 
+        BubbleSystem:printDebug("Added groups with prefix: " .. " '" .. prefix .. "' count: " .. tostring(BubbleSystem:countKeyVals(groupsList[prefix].groups)))
+    end
+end
+
+function BubbleSystem:start()
+    timer.scheduleFunction(BubbleSystem.mainloop, BubbleSystem, timer.getTime() + 1)
+end
+
+function BubbleSystem:mainloop()
+
+    local protectedWrapper = function ()
+        
+        --check groups not active groups
+        for prefix, groupData in pairs(groupsList) do 
+
+            for id, polledGroup in pairs(groupData.groups) do 
+                
+                if not polledGroup or not polledGroup:isExist() then 
+                    BubbleSystem:printDebug("Group already dead(id): " .. tostring(id))
+                    groupData.groups[id] = nil
+
+                elseif BubbleSystem:checkActivateGroup(polledGroup, groupData.activationRange) then 
+                    BubbleSystem:printDebug("Activate group: " .. polledGroup:getName())
+                    polledGroup:activate()
+                    --add to iads
+                    if groupData.addToIADS then 
+                        BubbleSystem:printDebug("Add to iads: " .. polledGroup:getName())
+                        groupData.addToIADS:addSAMSite(polledGroup:getName())
+                    end
+
+                    groupData.groups[polledGroup:getID()] = nil
+                    aliveGroupList[prefix][polledGroup:getID()] = polledGroup
+                end
+            end
+
+            if deactivateGroups then
+                
+                --check for deactivation
+                for id, polledGroup in pairs(aliveGroupList[prefix]) do 
+
+                    if not polledGroup or not polledGroup:isExist() then 
+
+                        BubbleSystem:printDebug("Alive group dead(id): " .. tostring(id))
+                        aliveGroupList[prefix][id] = nil
+                    elseif BubbleSystem:checkDeactivateGroup(polledGroup, groupData.activationRange) then 
+                        
+                        aliveGroupList[prefix][id] = nil
+                        local name = polledGroup:getName()
+                        local groupTable = mist.getCurrentGroupData(name)
+
+                        if groupData.addToIADS then 
+                            --delete from iads
+                            local sites = groupData.addToIADS.samSites
+                            for i = 1, #sites do 
+
+                                if sites[i]:getDCSRepresentation() == polledGroup then 
+                                    table.remove(sites, i)
+                                    break
+                                end
+                            end
+                        end
+                        polledGroup:destroy()--delete original
+
+                        --enable late activation 
+                        groupTable.lateActivation = true
+                        groupTable.visible = true
+
+                        --spawn again
+                        mist.dynAdd(groupTable)
+                        local newGroup = Group.getByName(name)
+                        groupData.groups[newGroup:getID()] = newGroup
+                        BubbleSystem:printDebug("Deactivate group: " .. name)
+                    end
+                end
+            end
+        end
+    end
+
+    local result, error = xpcall(protectedWrapper, debug.traceback)
+    if not result then 
+        local msg = "Buble script: error in mainloop: " .. tostring(error)
+        env.warning(msg)
+        BubbleSystem:printDebug(msg )
+    end
+    return timer.getTime() + stepTime
+end
+
+local eventHandler = {}
+
+function  eventHandler:protectedHandler(e)
+        
+    if e.id == 1 and e.weapon and e.weapon:getDesc().category == Weapon.Category.MISSILE then 
+        weaponsList[#weaponsList+1] = e.weapon
+    end
+
+    if e.id == 12 then 
+        world.removeEventHandler(eventHandler)
+    end 
+
+end
+
+function eventHandler:onEvent(e)
+    local result, error = pcall(eventHandler.protectedHandler, self, e)
+    if not result then 
+        local msg = "Bubble script: error in event handler: " .. tostring(error)
+        BubbleSystem:printDebug(msg)
+        env.warning(msg)
+    end
+end
+
+
+world.addEventHandler(eventHandler)
