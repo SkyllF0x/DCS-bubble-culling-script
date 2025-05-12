@@ -31,26 +31,35 @@ function BubbleSystem:enableDebug(value)
     self.debugOn = value
 end
 
-function BubbleSystem:addGroup(group, prefix, range, iads)
-    local idx = string.find(group:getName(), prefix) 
-    if idx then 
+function BubbleSystem:_addGroup(group, prefix, range, iads, callbackA, callbackB, onlyForPlayers)
+    if not string.find(group:getName(), prefix) then return end
+    if not mist.getGroupTable(group:getName()) or not mist.getGroupTable(group:getName()).lateActivation then
+        --group not use late activation
+        BubbleSystem:printDebug("Group not use lateActivation, add to alive: " .. group:getName())
+        if not aliveGroupList[prefix] then 
+        aliveGroupList[prefix] = {}
+        end
+        aliveGroupList[prefix][group:getID()] = group
+     end
 
-        if not mist.getGroupTable(group:getName()).lateActivation then
-            --group not use late activation
-            BubbleSystem:printDebug("Group not use lateActivation, skipped: " .. group:getName())
-            return
-         end
-
-        if not groupsList[prefix] then
-            groupsList[prefix] = {groups = {}, activationRange = range, addToIADS = iads}
+    if not groupsList[prefix] then
+        groupsList[prefix] = {
+        groups = {}, 
+        activationRange = range, 
+        addToIADS = iads, 
+        callbackA = callbackA, 
+        callbackB = callbackB, 
+        onlyForPlayers = onlyForPlayers}
+        if not aliveGroupList[prefix] then 
             aliveGroupList[prefix] = {}
-        end 
-        groupsList[prefix].groups[group:getID()] = group
-    end
+        end
+    end 
+    BubbleSystem:printDebug("Group added, prefix: " .. prefix .. " group: " .. group:getName())
+    groupsList[prefix].groups[group:getID()] = group
 end
 
 
-function BubbleSystem:checkActivateGroup(group, range)
+function BubbleSystem:checkActivateGroup(group, range, forPlayers)
     
     --check aircraft/helos
     for _, coal in pairs({coalition.side.RED, coalition.side.BLUE}) do 
@@ -63,7 +72,9 @@ function BubbleSystem:checkActivateGroup(group, range)
 
                     for _, unit in pairs(threatGroup:getUnits()) do 
 
-                        if mist.utils.get2DDist(unit:getPoint(), group:getUnit(1):getPoint()) < range then 
+                        if (not forPlayers or unit:getPlayerName()) and
+                            mist.utils.get2DDist(unit:getPoint(), group:getUnit(1):getPoint()) < range 
+                            then 
                             return true
                         end
                     end
@@ -72,7 +83,11 @@ function BubbleSystem:checkActivateGroup(group, range)
         end
 
     end
-
+    
+    
+    if forPlayers then 
+        return
+    end
     --check weapons
     local wpn = {}
     for _, weapon in pairs(weaponsList) do 
@@ -91,16 +106,16 @@ function BubbleSystem:checkActivateGroup(group, range)
     return false
 end
 
-function BubbleSystem:checkDeactivateGroup(group, range)
-    return not BubbleSystem:checkActivateGroup(group, range + deactivateMargin)
+function BubbleSystem:checkDeactivateGroup(group, range, forPlayers)
+    return not BubbleSystem:checkActivateGroup(group, range + deactivateMargin, forPlayers)
 end
 
-function BubbleSystem:addGroupsByPrefix(prefix, activateRange, iads)
+function BubbleSystem:addGroupsByPrefix(prefix, activateRange, iads, callbackActivate, callbackDeactivate, onlyPlayers)
 
     for _, coal in pairs({coalition.side.RED, coalition.side.BLUE}) do
         for _, group in pairs(coalition.getGroups(coal, Group.Category.GROUND)) do 
 
-            BubbleSystem:addGroup(group, prefix, activateRange, iads)
+            BubbleSystem:_addGroup(group, prefix, activateRange, iads, callbackActivate, callbackDeactivate, onlyPlayers)
         end
     end
 
@@ -109,47 +124,52 @@ function BubbleSystem:addGroupsByPrefix(prefix, activateRange, iads)
     end
 end
 
+
 function BubbleSystem:start()
     timer.scheduleFunction(BubbleSystem.mainloop, BubbleSystem, timer.getTime() + 1)
 end
 
 function BubbleSystem:mainloop()
-
+    
     local protectedWrapper = function ()
         
         --check groups not active groups
         for prefix, groupData in pairs(groupsList) do 
-
             for id, polledGroup in pairs(groupData.groups) do 
                 
                 if not polledGroup or not polledGroup:isExist() then 
                     BubbleSystem:printDebug("Group already dead(id): " .. tostring(id))
                     groupData.groups[id] = nil
 
-                elseif BubbleSystem:checkActivateGroup(polledGroup, groupData.activationRange) then 
+                elseif BubbleSystem:checkActivateGroup(polledGroup, groupData.activationRange, groupData.onlyForPlayers) then 
                     BubbleSystem:printDebug("Activate group: " .. polledGroup:getName())
                     polledGroup:activate()
+                    
+                    local IADS_SAM = nil
                     --add to iads
                     if groupData.addToIADS then 
                         BubbleSystem:printDebug("Add to iads: " .. polledGroup:getName())
-                        groupData.addToIADS:addSAMSite(polledGroup:getName())
+                        IADS_SAM = groupData.addToIADS:addSAMSite(polledGroup:getName())
                     end
 
                     groupData.groups[polledGroup:getID()] = nil
                     aliveGroupList[prefix][polledGroup:getID()] = polledGroup
+
+                    if groupData.callbackA then 
+                        groupData.callbackA({group = polledGroup, iads = groupData.addToIADS, iadsSam = IADS_SAM})
+                    end
                 end
             end
-
+                        
             if deactivateGroups then
                 
                 --check for deactivation
                 for id, polledGroup in pairs(aliveGroupList[prefix]) do 
-
+                    
                     if not polledGroup or not polledGroup:isExist() then 
-
                         BubbleSystem:printDebug("Alive group dead(id): " .. tostring(id))
                         aliveGroupList[prefix][id] = nil
-                    elseif BubbleSystem:checkDeactivateGroup(polledGroup, groupData.activationRange) then 
+                    elseif BubbleSystem:checkDeactivateGroup(polledGroup, groupData.activationRange, groupData.onlyForPlayers) then 
                         
                         aliveGroupList[prefix][id] = nil
                         local name = polledGroup:getName()
@@ -176,6 +196,10 @@ function BubbleSystem:mainloop()
                         mist.dynAdd(groupTable)
                         local newGroup = Group.getByName(name)
                         groupData.groups[newGroup:getID()] = newGroup
+
+                        if groupData.callbackB then 
+                            groupData.callbackB({group = polledGroup, newGroup = newGroup})
+                        end
                         BubbleSystem:printDebug("Deactivate group: " .. name)
                     end
                 end
