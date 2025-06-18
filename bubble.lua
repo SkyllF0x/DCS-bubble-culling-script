@@ -19,12 +19,13 @@ function BubbleSystem:countKeyVals(tbl)
 end
 
 function BubbleSystem:printDebug(msg)
+    env.info("Bubble script: " .. msg)
+
     if not self.debugOn then 
         return
     end
 
     trigger.action.outText(msg, 30)
-    env.info("Bubble script: " .. msg)
 end
 
 function BubbleSystem:enableDebug(value)
@@ -32,7 +33,7 @@ function BubbleSystem:enableDebug(value)
 end
 
 function BubbleSystem:_addGroup(group, prefix, range, iads, callbackA, callbackB, onlyForPlayers)
-    if not string.find(group:getName(), prefix) then return end
+    if not string.find(group:getName(), prefix) and not group:getName() == prefix then return end
     if not mist.getGroupTable(group:getName()) or not mist.getGroupTable(group:getName()).lateActivation then
         --group not use late activation
         BubbleSystem:printDebug("Group not use lateActivation, add to alive: " .. group:getName())
@@ -58,6 +59,45 @@ function BubbleSystem:_addGroup(group, prefix, range, iads, callbackA, callbackB
     groupsList[prefix].groups[group:getID()] = group
 end
 
+function BubbleSystem:findRange(group) 
+    local maxRange = 20000
+    for _, unit in pairs(group:getUnits()) do
+        if unit:getAmmo() then
+            for _, ammo in pairs(unit:getAmmo()) do 
+                if ammo.desc and (ammo.desc.rangeMaxAltMax or 20000) > maxRange then 
+                    maxRange = ammo.desc.rangeMaxAltMax or 20000
+                end
+            end
+        end
+    end
+    return maxRange
+end
+
+function BubbleSystem:isEW(group) 
+    for _, unit in pairs(group:getUnits()) do 
+        if unit:hasAttribute("EWR") then 
+            return true
+        end
+    end
+    
+    return false
+end
+
+function BubbleSystem:addGroups(coal) 
+
+    for _, group in pairs(coalition.getGroups(coal, Group.Category.GROUND)) do 
+        
+        if not BubbleSystem:isEW(group) then
+            local res, range  = pcall(function() return BubbleSystem:findRange(group) end)
+            if not res then 
+                range = 20000
+            end
+            
+            BubbleSystem:printDebug(group:getName() .. " range " .. tostring(range))
+            BubbleSystem:_addGroup(group, group:getName(), range, iads)
+        end
+    end
+end
 
 function BubbleSystem:checkActivateGroup(group, range, forPlayers)
     
