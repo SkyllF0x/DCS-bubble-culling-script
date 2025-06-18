@@ -83,7 +83,17 @@ function BubbleSystem:isEW(group)
     return false
 end
 
-function BubbleSystem:addGroups(coal) 
+function BubbleSystem:isSam(group) 
+    for _, unit in pairs(group:getUnits()) do 
+        if unit:hasAttribute("SAM") then 
+            return true
+        end
+    end
+    
+    return false
+end
+
+function BubbleSystem:addGroups(coal, iadsInstance) 
 
     for _, group in pairs(coalition.getGroups(coal, Group.Category.GROUND)) do 
         
@@ -94,7 +104,12 @@ function BubbleSystem:addGroups(coal)
             end
             
             BubbleSystem:printDebug(group:getName() .. " range " .. tostring(range))
-            BubbleSystem:_addGroup(group, group:getName(), range, iads)
+            if BubbleSystem:isSam(group) then 
+                BubbleSystem:_addGroup(group, group:getName(), range, iadsInstance)
+            else 
+                BubbleSystem:_addGroup(group, group:getName(), range)
+            end
+                
         end
     end
 end
